@@ -1,45 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { put } from "@vercel/blob";
-import Busboy from "busboy";
-
-interface ParsedFile {
-  buffer: Buffer;
-  fileName: string;
-  mimeType: string;
-}
-
-function parseMultipart(req: VercelRequest): Promise<ParsedFile> {
-  return new Promise((resolve, reject) => {
-    const busboy = Busboy({
-      headers: req.headers as Record<string, string>,
-      limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
-    });
-
-    let fileBuffer: Buffer | null = null;
-    let fileName = "";
-    let mimeType = "";
-
-    busboy.on("file", (_fieldname, file, info) => {
-      const chunks: Buffer[] = [];
-      fileName = info.filename;
-      mimeType = info.mimeType;
-      file.on("data", (chunk: Buffer) => chunks.push(chunk));
-      file.on("end", () => {
-        fileBuffer = Buffer.concat(chunks);
-      });
-    });
-
-    busboy.on("finish", () => {
-      if (!fileBuffer) {
-        return reject(new Error("No file uploaded"));
-      }
-      resolve({ buffer: fileBuffer, fileName, mimeType });
-    });
-
-    busboy.on("error", reject);
-    req.pipe(busboy);
-  });
-}
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
@@ -48,25 +8,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { buffer, fileName, mimeType } = await parseMultipart(req);
+    const body = req.body as HandleUploadBody;
 
-    if (!fileName.toLowerCase().endsWith(".pdf")) {
-      return res.status(400).json({ error: "Only PDF files are accepted." });
-    }
-
-    const blob = await put(fileName, buffer, {
-      access: "public",
-      contentType: mimeType || "application/pdf",
+    const jsonResponse = await handleUpload({
+      body,
+      request: req,
+      onBeforeGenerateToken: async (pathname) => {
+        // Validate the file is a PDF
+        if (!pathname.toLowerCase().endsWith(".pdf")) {
+          throw new Error("Only PDF files are accepted.");
+        }
+        return {
+          allowedContentTypes: ["application/pdf"],
+          maximumSizeInBytes: 50 * 1024 * 1024, // 50 MB
+        };
+      },
+      onUploadCompleted: async ({ blob }) => {
+        console.log("Upload completed:", blob.url);
+      },
     });
 
-    return res.status(200).json({
-      url: blob.url,
-      fileName,
-      size: buffer.length,
-    });
+    return res.status(200).json(jsonResponse);
   } catch (err) {
     console.error("Upload error:", err);
     const message = err instanceof Error ? err.message : "Unknown error";
-    return res.status(500).json({ error: message });
+    return res.status(400).json({ error: message });
   }
 }

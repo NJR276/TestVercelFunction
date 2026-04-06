@@ -1,48 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import Busboy from "busboy";
 import pdfParse from "pdf-parse";
-
-interface ParsedFile {
-  buffer: Buffer;
-  fileName: string;
-}
 
 interface RentEntry {
   period: string;
   annualBaseRent?: string;
   monthlyInstallment?: string;
   perSquareFoot?: string;
-}
-
-function parseMultipart(req: VercelRequest): Promise<ParsedFile> {
-  return new Promise((resolve, reject) => {
-    const busboy = Busboy({
-      headers: req.headers as Record<string, string>,
-      limits: { fileSize: 4 * 1024 * 1024 }, // 4 MB
-    });
-
-    let fileBuffer: Buffer | null = null;
-    let fileName = "";
-
-    busboy.on("file", (_fieldname, file, info) => {
-      const chunks: Buffer[] = [];
-      fileName = info.filename;
-      file.on("data", (chunk: Buffer) => chunks.push(chunk));
-      file.on("end", () => {
-        fileBuffer = Buffer.concat(chunks);
-      });
-    });
-
-    busboy.on("finish", () => {
-      if (!fileBuffer) {
-        return reject(new Error("No file uploaded"));
-      }
-      resolve({ buffer: fileBuffer, fileName });
-    });
-
-    busboy.on("error", reject);
-    req.pipe(busboy);
-  });
 }
 
 function extractRentAmounts(text: string): RentEntry[] {
@@ -134,57 +97,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method not allowed. Use POST." });
   }
 
-  const contentType = req.headers["content-type"] || "";
-  let fileData: Buffer | null = null;
-  let fileName = "";
-
-  // Option 1: JSON body with blobUrl (for large files stored in Vercel Blob)
-  if (contentType.includes("application/json")) {
-    const { blobUrl } = req.body as { blobUrl?: string };
-    if (!blobUrl) {
-      return res.status(400).json({ error: "JSON body must include 'blobUrl'." });
-    }
-    try {
-      fileData = await fetchBlob(blobUrl);
-      fileName = new URL(blobUrl).pathname.split("/").pop() || "document.pdf";
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      return res.status(502).json({ error: message });
-    }
-  }
-  // Option 2: Multipart upload (for small files under 4 MB)
-  else if (contentType.includes("multipart/form-data")) {
-    const contentLength = parseInt(req.headers["content-length"] || "0", 10);
-    if (contentLength > 4_000_000) {
-      return res.status(413).json({
-        error: "File too large for direct upload. Use /api/upload-pdf first, then pass the blobUrl.",
-        uploadEndpoint: "/api/upload-pdf",
-      });
-    }
-    try {
-      const parsed = await parseMultipart(req);
-      fileData = parsed.buffer;
-      fileName = parsed.fileName;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      return res.status(400).json({ error: message });
-    }
-  } else {
+  const { blobUrl } = req.body as { blobUrl?: string };
+  if (!blobUrl) {
     return res.status(400).json({
-      error: "Use multipart/form-data with a PDF file, or application/json with a blobUrl.",
+      error: "JSON body must include 'blobUrl'. Upload the file first via /api/upload-pdf.",
     });
   }
 
-  if (!fileData) {
-    return res.status(400).json({ error: "No file uploaded" });
+  let fileData: Buffer;
+  let fileName: string;
+  try {
+    fileData = await fetchBlob(blobUrl);
+    fileName = new URL(blobUrl).pathname.split("/").pop() || "document.pdf";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return res.status(502).json({ error: message });
   }
+
   if (!fileName.toLowerCase().endsWith(".pdf")) {
     return res.status(400).json({ error: "Only PDF files are accepted." });
   }
 
   try {
     const pdfData = await pdfParse(fileData);
-
     const rentAmounts = extractRentAmounts(pdfData.text);
 
     return res.status(200).json({
